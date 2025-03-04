@@ -3,17 +3,24 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.ServiceModel;
 using System.Threading.Tasks;
 using System.Xml;
 using System.Xml.Serialization;
+using Humanizer.Localisation;
 using Nop.Core;
 using Nop.Core.Domain.Catalog;
 using Nop.Core.Domain.Customers;
 using Nop.Core.Domain.Directory;
 using Nop.Core.Domain.Orders;
 using Nop.Core.Domain.Shipping;
+using Nop.Core.Http;
+using Nop.Plugin.Shipping.UPS.API.OAuth;
+using Nop.Plugin.Shipping.UPS.API.Rates;
+using Nop.Plugin.Shipping.UPS.API.Track;
 using Nop.Plugin.Shipping.UPS.Domain;
+using Nop.Plugin.Shipping.UPS.Properties;
 using Nop.Services;
 using Nop.Services.Directory;
 using Nop.Services.Localization;
@@ -21,6 +28,7 @@ using Nop.Services.Logging;
 using Nop.Services.Orders;
 using Nop.Services.Shipping;
 using Nop.Services.Shipping.Tracking;
+using Resources = Nop.Plugin.Shipping.UPS.Properties.Resources;
 
 namespace Nop.Plugin.Shipping.UPS.Services
 {
@@ -51,6 +59,7 @@ namespace Nop.Plugin.Shipping.UPS.Services
         #region Fields
 
         private readonly CurrencySettings _currencySettings;
+    	private readonly IHttpClientFactory _httpClientFactory;
         private readonly ICountryService _countryService;
         private readonly ICurrencyService _currencyService;
         private readonly ILocalizationService _localizationService;
@@ -67,11 +76,13 @@ namespace Nop.Plugin.Shipping.UPS.Services
         private MeasureDimension _inchesDimension;
         private MeasureWeight _lbWeight;
 
+    	private string _accessToken;
         #endregion
 
         #region Ctor
 
         public UPSService(CurrencySettings currencySettings,
+			IHttpClientFactory httpClientFactory,
             ICountryService countryService,
             ICurrencyService currencyService,
             ILocalizationService localizationService,
@@ -84,6 +95,7 @@ namespace Nop.Plugin.Shipping.UPS.Services
             UPSSettings upsSettings)
         {
             _currencySettings = currencySettings;
+        	_httpClientFactory = httpClientFactory;
             _countryService = countryService;
             _currencyService = currencyService;
             _localizationService = localizationService;
@@ -99,6 +111,29 @@ namespace Nop.Plugin.Shipping.UPS.Services
         #endregion
 
         #region Utilities
+
+    /// <summary>
+    /// Get access token
+    /// </summary>
+    /// <returns>The asynchronous task whose result contains access token</returns>
+    private async Task<string> GetAccessTokenAsync()
+    {
+        if (!string.IsNullOrEmpty(_accessToken))
+            return _accessToken;
+
+        if (string.IsNullOrEmpty(_upsSettings.ClientId))
+            throw new NopException("Client ID is not set");
+
+        if (string.IsNullOrEmpty(_upsSettings.ClientSecret))
+            throw new NopException("Client secret is not set");
+
+        var client = new OAuthClient(_httpClientFactory.CreateClient(NopHttpDefaults.DefaultHttpClient), _upsSettings);
+
+        var response = await client.GenerateTokenAsync();
+        _accessToken = response.Access_token;
+
+        return _accessToken;
+    }
 
         /// <summary>
         /// Get the weight limit for the selected weight measure
@@ -173,75 +208,13 @@ namespace Nop.Plugin.Shipping.UPS.Services
         /// A task that represents the asynchronous operation
         /// The task result contains the asynchronous task whose result contains the tracking info
         /// </returns>
-        private async Task<UPSTrack.TrackResponse> TrackAsync(UPSTrack.TrackRequest request)
+        private async Task<TrackResponse> TrackAsync(string trackingNumber)
         {
-            try
-            {
-                //create client
-                var trackPort = _upsSettings.UseSandbox
-                    ? UPSTrack.TrackPortTypeClient.EndpointConfiguration.TrackPort
-                    : UPSTrack.TrackPortTypeClient.EndpointConfiguration.ProductionTrackPort;
+            var client = new TrackClient(_httpClientFactory.CreateClient(NopHttpDefaults.DefaultHttpClient), _upsSettings, await GetAccessTokenAsync());
 
-                using var client = new UPSTrack.TrackPortTypeClient(trackPort);
-                //create object to authenticate request
-                var security = new UPSTrack.UPSSecurity
-                {
-                    ServiceAccessToken = new UPSTrack.UPSSecurityServiceAccessToken
-                    {
-                        AccessLicenseNumber = _upsSettings.AccessKey
-                    },
-                    UsernameToken = new UPSTrack.UPSSecurityUsernameToken
-                    {
-                        Username = _upsSettings.Username,
-                        Password = _upsSettings.Password
-                    }
-                };
+            var trackResponse = await client.TrackAsync(trackingNumber);
 
-                //save debug info
-                if (_upsSettings.Tracing)
-                    await _logger.InformationAsync($"UPS shipment tracking. Request: {ToXml(new UPSTrack.TrackRequest1(security, request))}");
-
-                //try to get response details
-                var response = await client.ProcessTrackAsync(security, request);
-
-                //save debug info
-                if (_upsSettings.Tracing)
-                    await _logger.InformationAsync($"UPS shipment tracking. Response: {ToXml(response)}");
-
-                return response.TrackResponse;
-            }
-            catch (FaultException<UPSTrack.ErrorDetailType[]> ex)
-            {
-                //get error details
-                var message = ex.Message;
-                if (ex.Detail.Any())
-                {
-                    message = ex.Detail.Aggregate(message, (details, detail) =>
-                        $"{details}{Environment.NewLine}{detail.Severity} error: {detail.PrimaryErrorCode?.Description}");
-                }
-
-                //rethrow exception
-                throw new Exception(message, ex);
-            }
-        }
-
-        /// <summary>
-        /// Create request details to track shipment
-        /// </summary>
-        /// <param name="trackingNumber">Tracking number</param>
-        /// <returns>Track request details</returns>
-        private UPSTrack.TrackRequest CreateTrackRequest(string trackingNumber)
-        {
-            return new UPSTrack.TrackRequest
-            {
-                Request = new UPSTrack.RequestType
-                {
-                    //use the RequestOption field to indicate the specific types of information to receive
-                    //15 = POD, Signature Image, COD, Receiver Address, All Activity (all that's available)
-                    RequestOption = new[] { "15" }
-                },
-                InquiryNumber = trackingNumber
-            };
+            return trackResponse;
         }
 
         /// <summary>
@@ -252,7 +225,7 @@ namespace Nop.Plugin.Shipping.UPS.Services
         /// A task that represents the asynchronous operation
         /// The task result contains the shipment status event 
         /// </returns>
-        private async Task<ShipmentStatusEvent> PrepareShipmentStatusEventAsync(UPSTrack.ActivityType activity)
+        private async Task<ShipmentStatusEvent> PrepareShipmentStatusEventAsync(Activity activity)
         {
             var shipmentStatusEvent = new ShipmentStatusEvent();
 
@@ -264,18 +237,28 @@ namespace Nop.Plugin.Shipping.UPS.Services
 
                 //prepare address
                 var addressDetails = new List<string>();
-                if (!string.IsNullOrEmpty(activity.ActivityLocation?.Address?.CountryCode))
-                    addressDetails.Add(activity.ActivityLocation.Address.CountryCode);
-                if (!string.IsNullOrEmpty(activity.ActivityLocation?.Address?.StateProvinceCode))
-                    addressDetails.Add(activity.ActivityLocation.Address.StateProvinceCode);
-                if (!string.IsNullOrEmpty(activity.ActivityLocation?.Address?.City))
-                    addressDetails.Add(activity.ActivityLocation.Address.City);
-                if (activity.ActivityLocation?.Address?.AddressLine?.Any() ?? false)
-                    addressDetails.AddRange(activity.ActivityLocation.Address.AddressLine);
-                if (!string.IsNullOrEmpty(activity.ActivityLocation?.Address?.PostalCode))
-                    addressDetails.Add(activity.ActivityLocation.Address.PostalCode);
 
-                shipmentStatusEvent.CountryCode = activity.ActivityLocation?.Address?.CountryCode;
+                var address = activity.Location?.Address;
+
+                if (address != null)
+                {
+                    if (!string.IsNullOrEmpty(address.CountryCode))
+                        addressDetails.Add(address.CountryCode);
+                    if (!string.IsNullOrEmpty(address.StateProvince))
+                        addressDetails.Add(address.StateProvince);
+                    if (!string.IsNullOrEmpty(address.City))
+                        addressDetails.Add(address.City);
+                    if (!string.IsNullOrEmpty(address.AddressLine1))
+                        addressDetails.Add(address.AddressLine1);
+                    if (!string.IsNullOrEmpty(address.AddressLine2))
+                        addressDetails.Add(address.AddressLine2);
+                    if (!string.IsNullOrEmpty(address.AddressLine3))
+                        addressDetails.Add(address.AddressLine3);
+                    if (!string.IsNullOrEmpty(address.PostalCode))
+                        addressDetails.Add(address.PostalCode);
+                }
+
+                shipmentStatusEvent.CountryCode = activity.Location?.Address?.CountryCode;
                 shipmentStatusEvent.Location = string.Join(", ", addressDetails);
 
                 if (activity.Status == null)
@@ -329,56 +312,14 @@ namespace Nop.Plugin.Shipping.UPS.Services
         /// A task that represents the asynchronous operation
         /// The task result contains the asynchronous task whose result contains the rates info
         /// </returns>
-        private async Task<UPSRate.RateResponse> GetRatesAsync(UPSRate.RateRequest request)
+        private async Task<RateResponse> GetRatesAsync(RateRequest request)
         {
-            try
-            {
-                //create client
-                var ratePort = _upsSettings.UseSandbox
-                    ? UPSRate.RatePortTypeClient.EndpointConfiguration.RatePort
-                    : UPSRate.RatePortTypeClient.EndpointConfiguration.ProductionRatePort;
+            var client = new RateClient(_httpClientFactory.CreateClient(NopHttpDefaults.DefaultHttpClient), _upsSettings, await GetAccessTokenAsync());
 
-                using var client = new UPSRate.RatePortTypeClient(ratePort);
-                //create object to authenticate request
-                var security = new UPSRate.UPSSecurity
-                {
-                    ServiceAccessToken = new UPSRate.UPSSecurityServiceAccessToken
-                    {
-                        AccessLicenseNumber = _upsSettings.AccessKey
-                    },
-                    UsernameToken = new UPSRate.UPSSecurityUsernameToken
-                    {
-                        Username = _upsSettings.Username,
-                        Password = _upsSettings.Password
-                    }
-                };
+            //try to get response details
+            var response = await client.ProcessRateAsync(request);
 
-                //save debug info
-                if (_upsSettings.Tracing)
-                    await _logger.InformationAsync($"UPS rates. Request: {ToXml(new UPSRate.RateRequest1(security, request))}");
-
-                //try to get response details
-                var response = await client.ProcessRateAsync(security, request);
-
-                //save debug info
-                if (_upsSettings.Tracing)
-                    await _logger.InformationAsync($"UPS rates. Response: {ToXml(response)}");
-
-                return response.RateResponse;
-            }
-            catch (FaultException<UPSRate.ErrorDetailType[]> ex)
-            {
-                //get error details
-                var message = ex.Message;
-                if (ex.Detail.Any())
-                {
-                    message = ex.Detail.Aggregate(message, (details, detail) =>
-                        $"{details}{Environment.NewLine}{detail.Severity} error: {detail.PrimaryErrorCode?.Description}");
-                }
-
-                //rethrow exception
-                throw new Exception(message, ex);
-            }
+            return response;
         }
 
         /// <summary>
@@ -390,16 +331,16 @@ namespace Nop.Plugin.Shipping.UPS.Services
         /// A task that represents the asynchronous operation
         /// The task result contains the rate request details
         /// </returns>
-        private async Task<UPSRate.RateRequest> CreateRateRequestAsync(GetShippingOptionRequest shippingOptionRequest, bool saturdayDelivery = false)
+        private async Task<RateRequest> CreateRateRequestAsync(GetShippingOptionRequest shippingOptionRequest, bool saturdayDelivery = false)
         {
             //set request details
-            var request = new UPSRate.RateRequest
+            var request = new RateRequest
             {
-                Request = new UPSRate.RequestType
+                Request = new RateRequest_Request
                 {
                     //used to define the request type
                     //Shop - the server validates the shipment, and returns rates for all UPS products from the ShipFrom to the ShipTo addresses
-                    RequestOption = new[] { "Shop" }
+                    RequestOption = "Shop"
                 }
             };
 
@@ -408,7 +349,7 @@ namespace Nop.Plugin.Shipping.UPS.Services
             var stateCodeFrom = shippingOptionRequest.StateProvinceFrom?.Abbreviation;
             var countryCodeFrom = (shippingOptionRequest.CountryFrom ?? (await _countryService.GetAllCountriesAsync()).FirstOrDefault())?.TwoLetterIsoCode ?? string.Empty;
 
-            var addressFromDetails = new UPSRate.ShipAddressType
+            var addressFrom = new Shipper_Address
             {
                 AddressLine = new[] { shippingOptionRequest.AddressFrom },
                 City = shippingOptionRequest.CityFrom,
@@ -416,42 +357,58 @@ namespace Nop.Plugin.Shipping.UPS.Services
                 CountryCode = countryCodeFrom,
                 PostalCode = shippingOptionRequest.ZipPostalCodeFrom
             };
-            var addressToDetails = new UPSRate.ShipToAddressType
+
+            var addressFromDetails = new ShipFrom_Address
+            {
+                AddressLine = new[] { shippingOptionRequest.AddressFrom },
+                City = shippingOptionRequest.CityFrom,
+                StateProvinceCode = stateCodeFrom,
+                CountryCode = countryCodeFrom,
+                PostalCode = shippingOptionRequest.ZipPostalCodeFrom
+            };
+            var addressToDetails = new ShipTo_Address
             {
                 AddressLine = new[] { shippingOptionRequest.ShippingAddress.Address1, shippingOptionRequest.ShippingAddress.Address2 },
                 City = shippingOptionRequest.ShippingAddress.City,
                 StateProvinceCode = stateCodeTo,
                 CountryCode = (await _countryService.GetCountryByAddressAsync(shippingOptionRequest.ShippingAddress))?.TwoLetterIsoCode,
                 PostalCode = shippingOptionRequest.ShippingAddress.ZipPostalCode,
-                ResidentialAddressIndicator = string.Empty
+                //ResidentialAddressIndicator = "false"
             };
 
             //set shipment details
-            request.Shipment = new UPSRate.ShipmentType
+            request.Shipment = new RateRequest_Shipment
             {
-                Shipper = new UPSRate.ShipperType
+                Shipper = new Shipment_Shipper
                 {
                     ShipperNumber = _upsSettings.AccountNumber,
-                    Address = addressFromDetails
+                    Address = addressFrom
                 },
-                ShipFrom = new UPSRate.ShipFromType
+                ShipFrom = new Shipment_ShipFrom
                 {
                     Address = addressFromDetails
                 },
-                ShipTo = new UPSRate.ShipToType
+                ShipTo = new Shipment_ShipTo
                 {
                     Address = addressToDetails
+                },
+                DeliveryTimeInformation = new Shipment_DeliveryTimeInformation
+                {
+                    Pickup = new DeliveryTimeInformation_Pickup
+                    {
+                        Date = UPSService.AddBusinessDays(DateTime.Now, int.Parse(Resources.AddDaysToTransit)).ToString("yyyyMMdd")
+                    }
                 }
             };
 
             //set pickup options and customer classification for US shipments
             if (countryCodeFrom.Equals("US", StringComparison.InvariantCultureIgnoreCase))
             {
-                request.PickupType = new UPSRate.CodeDescriptionType
+                request.PickupType = new RateRequest_PickupType
                 {
                     Code = GetUpsCode(_upsSettings.PickupType)
                 };
-                request.CustomerClassification = new UPSRate.CodeDescriptionType
+                request.CustomerClassification = new RateRequest_CustomerClassification
                 {
                     Code = GetUpsCode(_upsSettings.CustomerClassification)
                 };
@@ -460,7 +417,7 @@ namespace Nop.Plugin.Shipping.UPS.Services
             //set negotiated rates details
             if (!string.IsNullOrEmpty(_upsSettings.AccountNumber) && !string.IsNullOrEmpty(stateCodeFrom) && !string.IsNullOrEmpty(stateCodeTo))
             {
-                request.Shipment.ShipmentRatingOptions = new UPSRate.ShipmentRatingOptionsType
+                request.Shipment.ShipmentRatingOptions = new Shipment_ShipmentRatingOptions
                 {
                     NegotiatedRatesIndicator = string.Empty,
                     UserLevelDiscountIndicator = string.Empty
@@ -470,7 +427,7 @@ namespace Nop.Plugin.Shipping.UPS.Services
             //set Saturday delivery details
             if (saturdayDelivery)
             {
-                request.Shipment.ShipmentServiceOptions = new UPSRate.ShipmentServiceOptionsType
+                request.Shipment.ShipmentServiceOptions = new Shipment_ShipmentServiceOptions
                 {
                     SaturdayDeliveryIndicator = string.Empty
                 };
@@ -498,12 +455,12 @@ namespace Nop.Plugin.Shipping.UPS.Services
         /// A task that represents the asynchronous operation
         /// The task result contains the package details
         /// </returns>
-        private async Task<UPSRate.PackageType> CreatePackageAsync(decimal width, decimal length, decimal height, decimal weight, decimal insuranceAmount)
+        private async Task<Shipment_Package> CreatePackageAsync(decimal width, decimal length, decimal height, decimal weight, decimal insuranceAmount)
         {
             //set package details
-            var package = new UPSRate.PackageType
+            var package = new Shipment_Package
             {
-                PackagingType = new UPSRate.CodeDescriptionType
+                PackagingType = new Package_PackagingType
                 {
                     Code = GetUpsCode(_upsSettings.PackagingType)
                 }
@@ -512,28 +469,28 @@ namespace Nop.Plugin.Shipping.UPS.Services
             //set dimensions and weight details
             if (!_upsSettings.PassDimensions)
                 width = length = height = 0;
-            package.Dimensions = new UPSRate.DimensionsType
+            package.Dimensions = new Package_Dimensions
             {
                 Width = width.ToString("0.00", CultureInfo.InvariantCulture),
                 Length = length.ToString("0.00", CultureInfo.InvariantCulture),
                 Height = height.ToString("0.00", CultureInfo.InvariantCulture),
-                UnitOfMeasurement = new UPSRate.CodeDescriptionType { Code = _upsSettings.DimensionsType }
+                UnitOfMeasurement = new Dimensions_UnitOfMeasurement { Code = _upsSettings.DimensionsType, Description = _upsSettings.DimensionsType }
             };
-            package.PackageWeight = new UPSRate.PackageWeightType
+            package.PackageWeight = new Package_PackageWeight
             {
                 Weight = weight.ToString("0.00", CultureInfo.InvariantCulture),
-                UnitOfMeasurement = new UPSRate.CodeDescriptionType { Code = _upsSettings.WeightType },
+                UnitOfMeasurement = new PackageWeight_UnitOfMeasurement { Code = _upsSettings.WeightType, Description = _upsSettings.WeightType },
             };
 
             //set insurance details
             if (_upsSettings.InsurePackage && insuranceAmount > decimal.Zero)
             {
                 var currencyCode = (await _currencyService.GetCurrencyByIdAsync(_currencySettings.PrimaryStoreCurrencyId))?.CurrencyCode;
-                package.PackageServiceOptions = new UPSRate.PackageServiceOptionsType
+                package.PackageServiceOptions = new Package_PackageServiceOptions
                 {
-                    Insurance = new UPSRate.InsuranceType
+                    Insurance = new PackageServiceOptions_Insurance
                     {
-                        BasicFlexibleParcelIndicator = new UPSRate.InsuranceValueType
+                        BasicFlexibleParcelIndicator = new Insurance_BasicFlexibleParcelIndicator
                         {
                             CurrencyCode = currencyCode,
                             MonetaryValue = insuranceAmount.ToString("0.00", CultureInfo.InvariantCulture)
@@ -553,7 +510,7 @@ namespace Nop.Plugin.Shipping.UPS.Services
         /// A task that represents the asynchronous operation
         /// The task result contains the packages
         /// </returns>
-        private async Task<IEnumerable<UPSRate.PackageType>> GetPackagesForOneItemPerPackageAsync(GetShippingOptionRequest shippingOptionRequest)
+        private async Task<IEnumerable<Shipment_Package>> GetPackagesForOneItemPerPackageAsync(GetShippingOptionRequest shippingOptionRequest)
         {
             return await shippingOptionRequest.Items.SelectManyAwait(async packageItem =>
             {
@@ -563,10 +520,8 @@ namespace Nop.Plugin.Shipping.UPS.Services
 
                 var insuranceAmount = 0;
                 if (_upsSettings.InsurePackage)
-                {
                     //The maximum declared amount per package: 50000 USD.
                     insuranceAmount = Convert.ToInt32(packageItem.Product.Price);
-                }
 
                 //create packages according to item quantity
                 var package = await CreatePackageAsync(width, length, height, weight, insuranceAmount);
@@ -574,6 +529,7 @@ namespace Nop.Plugin.Shipping.UPS.Services
                 return Enumerable.Repeat(package, packageItem.GetQuantity());
             }).ToListAsync();
         }
+
 
         /// <summary>
         /// Create packages (total dimensions of shopping cart items determines number of packages)
@@ -583,7 +539,7 @@ namespace Nop.Plugin.Shipping.UPS.Services
         /// A task that represents the asynchronous operation
         /// The task result contains the packages
         /// </returns>
-        private async Task<IEnumerable<UPSRate.PackageType>> GetPackagesByDimensionsAsync(GetShippingOptionRequest shippingOptionRequest)
+        private async Task<IEnumerable<Shipment_Package>> GetPackagesByDimensionsAsync(GetShippingOptionRequest shippingOptionRequest)
         {
             //get dimensions and weight of the whole package
             var (width, length, height) = await GetDimensionsAsync(shippingOptionRequest.Items);
@@ -654,19 +610,21 @@ namespace Nop.Plugin.Shipping.UPS.Services
         /// A task that represents the asynchronous operation
         /// The task result contains the packages
         /// </returns>
-        private async Task<IEnumerable<UPSRate.PackageType>> GetPackagesByCubicRootAsync(GetShippingOptionRequest shippingOptionRequest)
+        private async Task<IEnumerable<Shipment_Package>> GetPackagesByCubicRootAsync(GetShippingOptionRequest shippingOptionRequest)
         {
+            ArgumentNullException.ThrowIfNull(shippingOptionRequest);
+
             //Dimensional weight is based on volume (the amount of space a package occupies in relation to its actual weight). 
             //If the cubic size of package measures three cubic feet (5,184 cubic inches or 84,951 cubic centimetres) or greater, you will be charged the greater of the dimensional weight or the actual weight.
             //This algorithm devides total package volume by the UPS settings PackingPackageVolume so that no package requires dimensional weight; this could result in an under-charge.
 
             var totalPackagesBySizeLimit = 1;
-            var width = 0M;
-            var length = 0M;
-            var height = 0M;
+            decimal width;
+            decimal length;
+            decimal height;
 
             //if there is only one item, no need to calculate dimensions
-            if (shippingOptionRequest.Items.Count == 1 && shippingOptionRequest.Items.FirstOrDefault().GetQuantity() == 1)
+            if (shippingOptionRequest.Items.Count == 1 && shippingOptionRequest.Items?.FirstOrDefault()?.GetQuantity() == 1)
             {
                 //get dimensions and weight of the single cubic size of package
                 var item = shippingOptionRequest.Items.FirstOrDefault();
@@ -730,6 +688,7 @@ namespace Nop.Plugin.Shipping.UPS.Services
 
             //create packages according to calculated value
             var package = await CreatePackageAsync(width, length, height, weight / totalPackages, insuranceAmountPerPackage);
+
             return Enumerable.Repeat(package, totalPackages);
         }
 
@@ -851,7 +810,9 @@ namespace Nop.Plugin.Shipping.UPS.Services
                         shippingOption.Name = $"{shippingOption.Name} - Saturday Delivery";
 
                     //add additional handling charge
-                    shippingOption.Rate += _upsSettings.AdditionalHandlingCharge;
+                    //shippingOption.Rate += _upsSettings.AdditionalHandlingCharge;
+                    // Do percentage markup in-place of the AdditionalHandlingCharge
+                    shippingOption.Rate += shippingOption.Rate * _upsSettings.AdditionalHandlingCharge;
 
                     return shippingOption;
                 }).ToList(), null);
@@ -866,6 +827,37 @@ namespace Nop.Plugin.Shipping.UPS.Services
             }
         }
 
+        public static DateTime AddBusinessDays(DateTime date, int days)
+        {
+            if (days < 0)
+                throw new ArgumentException("Days cannot be negative", nameof(days));
+
+            if (days == 0)
+                return date;
+
+            // Move forward if the start date is on a weekend
+            if (date.DayOfWeek == DayOfWeek.Saturday)
+            {
+                date = date.AddDays(2);
+                days--;
+            }
+            else if (date.DayOfWeek == DayOfWeek.Sunday)
+            {
+                date = date.AddDays(1);
+                days--;
+            }
+
+            // Add full weeks
+            date = date.AddDays((days / 5) * 7);
+
+            // Add remaining business days
+            int extraDays = days % 5;
+            if (date.DayOfWeek + extraDays > DayOfWeek.Friday)
+                extraDays += 2; // Skip the weekend
+
+            return date.AddDays(extraDays);
+        }
+
         /// <summary>
         /// Prepare shipping options
         /// </summary>
@@ -874,7 +866,7 @@ namespace Nop.Plugin.Shipping.UPS.Services
         /// A task that represents the asynchronous operation
         /// The task result contains the shipping options
         /// </returns>
-        private async Task<IEnumerable<ShippingOption>> PrepareShippingOptionsAsync(UPSRate.RateResponse rateResponse)
+        private async Task<IEnumerable<ShippingOption>> PrepareShippingOptionsAsync(RateResponse rateResponse)
         {
             var shippingOptions = new List<ShippingOption>();
 
@@ -912,11 +904,13 @@ namespace Nop.Plugin.Shipping.UPS.Services
 
                 //parse transit days
                 int? transitDays = null;
-                if (!string.IsNullOrWhiteSpace(rate.GuaranteedDelivery?.BusinessDaysInTransit))
-                {
-                    if (int.TryParse(rate.GuaranteedDelivery.BusinessDaysInTransit, out var businessDaysInTransit))
+
+                var serviceSummary = rate.TimeInTransit?.ServiceSummary;
+
+                if (serviceSummary != null)
+                    if (!string.IsNullOrWhiteSpace(serviceSummary.EstimatedArrival.BusinessDaysInTransit) && int.TryParse(serviceSummary.EstimatedArrival.BusinessDaysInTransit, out var businessDaysInTransit))
                         transitDays = businessDaysInTransit;
-                }
+                transitDays += int.Parse(Resources.AddDaysToTransit);
 
                 //add shipping option based on service rate
                 shippingOptions.Add(new ShippingOption
@@ -927,7 +921,7 @@ namespace Nop.Plugin.Shipping.UPS.Services
                 });
             }
 
-            return shippingOptions;
+            return shippingOptions.OrderBy((ShippingOption x) => x.Rate);
         }
 
         #endregion
@@ -956,11 +950,8 @@ namespace Nop.Plugin.Shipping.UPS.Services
         {
             try
             {
-                //create request details
-                var request = CreateTrackRequest(trackingNumber);
-
                 //get tracking info
-                var response = await TrackAsync(request);
+                var response = await TrackAsync(trackingNumber);
 
                 if (response.Shipment == null)
                     return null;

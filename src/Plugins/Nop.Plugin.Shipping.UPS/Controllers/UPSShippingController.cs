@@ -69,9 +69,8 @@ namespace Nop.Plugin.Shipping.UPS.Controllers
             var model = new UPSShippingModel
             {
                 AccountNumber = _upsSettings.AccountNumber,
-                AccessKey = _upsSettings.AccessKey,
-                Username = _upsSettings.Username,
-                Password = _upsSettings.Password,
+	            ClientId = _upsSettings.ClientId,
+	            ClientSecret = _upsSettings.ClientSecret,
                 UseSandbox = _upsSettings.UseSandbox,
                 AdditionalHandlingCharge = _upsSettings.AdditionalHandlingCharge,
                 InsurePackage = _upsSettings.InsurePackage,
@@ -133,9 +132,8 @@ namespace Nop.Plugin.Shipping.UPS.Controllers
 
             //save settings
             _upsSettings.AccountNumber = model.AccountNumber;
-            _upsSettings.AccessKey = model.AccessKey;
-            _upsSettings.Username = model.Username;
-            _upsSettings.Password = model.Password;
+            _upsSettings.ClientId = model.ClientId;
+        	_upsSettings.ClientSecret = model.ClientSecret;
             _upsSettings.UseSandbox = model.UseSandbox;
             _upsSettings.AdditionalHandlingCharge = model.AdditionalHandlingCharge;
             _upsSettings.CustomerClassification = (CustomerClassification)model.CustomerClassification;

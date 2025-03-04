@@ -116,7 +116,8 @@ namespace Nop.Plugin.Shipping.UPS
                 PackingType = PackingType.PackByDimensions,
                 PassDimensions = true,
                 WeightType = "LBS",
-                DimensionsType = "IN"
+                DimensionsType = "IN",
+            	RequestTimeout = UPSDefaults.RequestTimeout
             });
 
             //locales
@@ -133,6 +134,10 @@ namespace Nop.Plugin.Shipping.UPS
                 ["Plugins.Shipping.UPS.Fields.AdditionalHandlingCharge.Hint"] = "Enter additional handling fee to charge your customers.",
                 ["Plugins.Shipping.UPS.Fields.AvailableCarrierServices"] = "Carrier Services",
                 ["Plugins.Shipping.UPS.Fields.AvailableCarrierServices.Hint"] = "Select the services you want to offer to customers.",
+	            ["Plugins.Shipping.UPS.Fields.ClientId"] = "Client ID",
+	            ["Plugins.Shipping.UPS.Fields.ClientId.Hint"] = "Specify UPS client ID.",
+	            ["Plugins.Shipping.UPS.Fields.ClientSecret"] = "Client secret",
+	            ["Plugins.Shipping.UPS.Fields.ClientSecret.Hint"] = "Specify UPS client secret.",
                 ["Plugins.Shipping.UPS.Fields.CustomerClassification"] = "UPS Customer Classification",
                 ["Plugins.Shipping.UPS.Fields.CustomerClassification.Hint"] = "Choose customer classification.",
                 ["Plugins.Shipping.UPS.Fields.DimensionsType"] = "Dimensions type",
